@@ -1,0 +1,27 @@
+# ===== 1. C/C++ 编译产物 =====
+*.o
+*.obj
+*.so
+*.a
+*.out
+*.exe
+
+# ===== 2. 测评机运行过程中产生的临时文件 =====
+# 过滤掉生成的测试输出文件、临时用户二进制程序
+*.tmp
+*.log
+/user_bin/
+/temp/
+/workspace/
+/test_cases/
+
+# ===== 3. 构建工具/IDE 产生的目录 =====
+build/
+bin/
+cmake-build-debug/
+cmake-build-release/
+.vscode/
+.idea/
+
+# ===== 4. 系统临时文件 =====
+.DS_Store
