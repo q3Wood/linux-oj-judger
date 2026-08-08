@@ -1,6 +1,7 @@
 #include "Runner.hpp"
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/resource.h> // 引入资源限制和内存测量 API
 #include <fcntl.h>
 #include <chrono>
 #include <iostream>
@@ -9,7 +10,8 @@
 JudgeResult Runner::run(const std::string& execPath, 
                       const std::string& inputPath, 
                       const std::string& outputPath, 
-                      int timeLimitMs) {
+                      int timeLimitMs,
+                      int memoryLimitKb) {
     JudgeResult result;
     result.status = Status::ACCEPTED;
 
@@ -24,7 +26,21 @@ JudgeResult Runner::run(const std::string& execPath,
     }
 
     if (pid == 0) {
-        // === 子进程：负责运行用户代码 ===
+        // ================= 【子进程：安全防护配置】 =================
+        
+        // 1. 限制输出文件最大为 20MB (防止写爆硬盘)
+        struct rlimit fsize_limit;
+        fsize_limit.rlim_cur = 20 * 1024 * 1024; // 20 MB
+        fsize_limit.rlim_max = 20 * 1024 * 1024;
+        setrlimit(RLIMIT_FSIZE, &fsize_limit);
+
+        // 2. 限制栈内存空间最大为 16MB (防止递归爆栈)
+        struct rlimit stack_limit;
+        stack_limit.rlim_cur = 16 * 1024 * 1024; // 16 MB
+        stack_limit.rlim_max = 16 * 1024 * 1024;
+        setrlimit(RLIMIT_STACK, &stack_limit);
+
+        // 重定向文件
         int inFd = open(inputPath.c_str(), O_RDONLY);
         int outFd = open(outputPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
@@ -34,7 +50,6 @@ JudgeResult Runner::run(const std::string& execPath,
 
         dup2(inFd, STDIN_FILENO);
         dup2(outFd, STDOUT_FILENO);
-
         close(inFd);
         close(outFd);
 
@@ -42,33 +57,27 @@ JudgeResult Runner::run(const std::string& execPath,
         execv(execPath.c_str(), args);
         exit(1);
     } else {
-        // === 父进程：非阻塞轮询监控子进程是否超时 ===
+        // ================= 【父进程：监控与内存统计】 =================
         int status;
         int elapsedMs = 0;
         bool isTimeout = false;
 
         while (true) {
-            // WNOHANG 选项表示不卡死等待，如果子进程没结束立刻返回 0
             pid_t res = waitpid(pid, &status, WNOHANG);
 
             if (res == pid) {
-                // 子进程正常退出了！
-                break;
+                break; // 子进程结束
             } else if (res == 0) {
-                // 子进程还在运行，休眠 10 毫秒后重新检查
-                usleep(10000); 
+                usleep(10000); // 休眠 10ms
                 elapsedMs += 10;
 
-                // 判断是否超时！
                 if (elapsedMs >= timeLimitMs) {
-                    // 超时！给子进程发送 SIGKILL 强制杀绝信号！
                     kill(pid, SIGKILL);
-                    waitpid(pid, &status, 0); // 回收僵尸进程
+                    waitpid(pid, &status, 0);
                     isTimeout = true;
                     break;
                 }
             } else {
-                // 系统异常
                 break;
             }
         }
@@ -77,18 +86,35 @@ JudgeResult Runner::run(const std::string& execPath,
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
         result.time_cost_ms = static_cast<int>(duration);
 
+        // 测量子进程消耗的【物理内存峰值】 (ru_maxrss 单位在 Linux 下是 KB)
+        struct rusage r_usage;
+        getrusage(RUSAGE_CHILDREN, &r_usage);
+        result.memory_cost_kb = static_cast<int>(r_usage.ru_maxrss);
+
+        // 1. 先检查是否超时 (TLE)
         if (isTimeout) {
             result.status = Status::TIME_LIMIT_EXCEEDED;
             return result;
         }
 
-        // 检查非超时的异常退出（如段错误、除以 0）
+        // 2. 再检查内存是否爆了 (MLE)
+        if (result.memory_cost_kb > memoryLimitKb) {
+            result.status = Status::MEMORY_LIMIT_EXCEEDED;
+            return result;
+        }
+
+        // 3. 检查异常崩溃 (RE)
         if (WIFEXITED(status)) {
             if (WEXITSTATUS(status) != 0) {
                 result.status = Status::RUNTIME_ERROR;
             }
-        } else {
-            result.status = Status::RUNTIME_ERROR;
+        } else if (WIFSIGNALED(status)) {
+            int sig = WTERMSIG(status);
+            if (sig == SIGSEGV) {
+                result.status = Status::OUTPUT_LIMIT_EXCEEDED; // 内存访问违规，可能是内存越界
+            } else {
+                result.status = Status::RUNTIME_ERROR; // 其他信号导致的崩溃
+            }
         }
     }
 

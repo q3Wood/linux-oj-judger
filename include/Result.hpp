@@ -11,7 +11,8 @@ enum class Status {
     TIME_LIMIT_EXCEEDED,    // TLE: 超时
     MEMORY_LIMIT_EXCEEDED,  // MLE: 内存超限
     RUNTIME_ERROR,          // RE: 运行时错误
-    SYSTEM_ERROR            // SE: 系统故障
+    SYSTEM_ERROR,           // SE: 系统故障
+    OUTPUT_LIMIT_EXCEEDED,  // OLE: 输出超限
 };
 
 // 判题详情结构体
