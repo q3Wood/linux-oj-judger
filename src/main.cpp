@@ -11,7 +11,6 @@
 
 namespace fs = std::filesystem;
 
-// 1. 辅助函数：将 Status 枚举转为标准的英文字符串
 std::string statusToString(Status status) {
     switch (status) {
         case Status::ACCEPTED:               return "ACCEPTED";
@@ -26,7 +25,6 @@ std::string statusToString(Status status) {
     }
 }
 
-// 2. 辅助函数：转义字符串中的双引号和换行符，防止破坏 JSON 格式
 std::string escapeJson(const std::string& input) {
     std::string output;
     for (char c : input) {
@@ -40,7 +38,6 @@ std::string escapeJson(const std::string& input) {
     return output;
 }
 
-// 3. 辅助函数：统一在控制台最后打印标准的 JSON 结果字符串
 void outputJson(Status status, int timeMs, int memoryKb, const std::string& errorMsg, int passCount, int totalCount) {
     std::cout << "[JSON_RESULT]:"
               << "{\"status\":\"" << statusToString(status) << "\","
@@ -53,13 +50,11 @@ void outputJson(Status status, int timeMs, int memoryKb, const std::string& erro
 }
 
 int main(int argc, char* argv[]) {
-    // 默认参数
     std::string problemId = "1";
     std::string srcPath = "../test_cases/1/solution.cpp";
     int timeLimitMs = 1000;          
     int memoryLimitKb = 128 * 1024;   
 
-    // 解析命令行参数
     int opt;
     while ((opt = getopt(argc, argv, "p:s:t:m:")) != -1) {
         switch (opt) {
@@ -72,29 +67,40 @@ int main(int argc, char* argv[]) {
     }
 
     std::string testCasesDir = "../test_cases/" + problemId;
-    std::string execPath = "../workspace/solution_" + problemId;
+    std::string workspaceDir = "../workspace";
+    std::string execPath = workspaceDir + "/solution_" + problemId;
     std::string errorMsg;
 
-    // 检查用例目录是否存在
-    if (!fs::exists(testCasesDir)) {
-        outputJson(Status::SYSTEM_ERROR, 0, 0, "Testcase directory not found for problem " + problemId, 0, 0);
+    // 健壮性保障 1: 自动创建 workspace 目录
+    try {
+        fs::create_directories(workspaceDir);
+    } catch (const std::exception& e) {
+        outputJson(Status::SYSTEM_ERROR, 0, 0, "Failed to create workspace directory", 0, 0);
         return 0;
     }
 
-    // 1. 编译阶段
+    // 健壮性保障 2: 检查用例目录
+    if (!fs::exists(testCasesDir)) {
+        outputJson(Status::SYSTEM_ERROR, 0, 0, "Testcase directory not found: " + testCasesDir, 0, 0);
+        return 0;
+    }
+
+    // 1. 安全编译
     if (!Compiler::compileCpp(srcPath, execPath, errorMsg)) {
         outputJson(Status::COMPILE_ERROR, 0, 0, errorMsg, 0, 0);
         return 0;
     }
 
-    // 2. 自动扫描用例目录
-    int totalCount = 0;
+    // 健壮性保障 3: 搜集实际存在的 .in 文件名并排序
+    std::vector<std::string> inFiles;
     for (const auto& entry : fs::directory_iterator(testCasesDir)) {
         if (entry.path().extension() == ".in") {
-            totalCount++;
+            inFiles.push_back(entry.path().stem().string()); // 拿到如 "1", "2"
         }
     }
+    std::sort(inFiles.begin(), inFiles.end()); // 字典序排序
 
+    int totalCount = inFiles.size();
     if (totalCount == 0) {
         outputJson(Status::SYSTEM_ERROR, 0, 0, "No .in testcases found in " + testCasesDir, 0, 0);
         return 0;
@@ -103,23 +109,27 @@ int main(int argc, char* argv[]) {
     int maxTimeCost = 0;
     int maxMemoryCost = 0;
 
-    // 3. 循环测试所有用例
-    for (int i = 1; i <= totalCount; ++i) {
-        std::string inputPath = testCasesDir + "/" + std::to_string(i) + ".in";
-        std::string stdOutPath = testCasesDir + "/" + std::to_string(i) + ".out";
-        std::string userOutPath = "../workspace/user_" + problemId + "_" + std::to_string(i) + ".out";
+    // 2. 遍历实际匹配的用例文件
+    for (int i = 0; i < totalCount; ++i) {
+        std::string baseName = inFiles[i];
+        std::string inputPath = testCasesDir + "/" + baseName + ".in";
+        std::string stdOutPath = testCasesDir + "/" + baseName + ".out";
+        std::string userOutPath = workspaceDir + "/user_" + problemId + "_" + baseName + ".out";
 
-        JudgeResult runResult = Runner::run(execPath, inputPath, userOutPath, timeLimitMs, memoryLimitKb);
-
-        // 如果运行出错，提前返回对应错误的 JSON
-        if (runResult.status != Status::ACCEPTED) {
-            outputJson(runResult.status, runResult.time_cost_ms, runResult.memory_cost_kb, runResult.error_msg, i - 1, totalCount);
+        if (!fs::exists(stdOutPath)) {
+            outputJson(Status::SYSTEM_ERROR, 0, 0, "Missing corresponding .out file for " + baseName + ".in", i, totalCount);
             return 0;
         }
 
-        // 比对输出
+        JudgeResult runResult = Runner::run(execPath, inputPath, userOutPath, timeLimitMs, memoryLimitKb);
+
+        if (runResult.status != Status::ACCEPTED) {
+            outputJson(runResult.status, runResult.time_cost_ms, runResult.memory_cost_kb, runResult.error_msg, i, totalCount);
+            return 0;
+        }
+
         if (!Comparer::compare(userOutPath, stdOutPath)) {
-            outputJson(Status::WRONG_ANSWER, runResult.time_cost_ms, runResult.memory_cost_kb, "Output mismatch on testcase " + std::to_string(i), i - 1, totalCount);
+            outputJson(Status::WRONG_ANSWER, runResult.time_cost_ms, runResult.memory_cost_kb, "Output mismatch on " + baseName + ".in", i, totalCount);
             return 0;
         }
 
@@ -127,7 +137,6 @@ int main(int argc, char* argv[]) {
         maxMemoryCost = std::max(maxMemoryCost, runResult.memory_cost_kb);
     }
 
-    // 4. 全部测试点通过！输出最终成功的 JSON
     outputJson(Status::ACCEPTED, maxTimeCost, maxMemoryCost, "", totalCount, totalCount);
 
     return 0;
