@@ -64,13 +64,21 @@ void outputJson(Status status, int timeMs, int memoryKb, const std::string& erro
 }
 
 // 自然数逻辑比较：确保 "2.in" 排在 "10.in" 前面
+// 智能自然数排序：防止 "12" 和 "12b" 解析成相同数字导致排序不稳定
 bool naturalSortCompare(const std::string& a, const std::string& b) {
     try {
-        int numA = std::stoi(a);
-        int numB = std::stoi(b);
-        return numA < numB;
+        size_t idxA = 0, idxB = 0;
+        int numA = std::stoi(a, &idxA);
+        int numB = std::stoi(b, &idxB);
+
+        // 如果数字前缀不相等，直接按数字大小排
+        if (numA != numB) {
+            return numA < numB;
+        }
+        // 如果数字前缀相同（例如 "12" 和 "12b"），则退回字符串字典序全量比对
+        return a < b;
     } catch (...) {
-        return a < b; // 退回字典序
+        return a < b; // 解析非纯数字时，退回标准字符串比对
     }
 }
 

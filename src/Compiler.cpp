@@ -19,24 +19,31 @@ bool Compiler::compileCpp(const std::string& srcPath, const std::string& execPat
     if (pid == 0) {
         setpgid(0, 0);
 
-        // 编译期防死锁：15 秒 CPU 时间，1GB 内存上限
+        // 编译期资源限制：15s CPU，1GB 内存
         struct rlimit cpu_limit;
         cpu_limit.rlim_cur = 15;
         cpu_limit.rlim_max = 15;
         setrlimit(RLIMIT_CPU, &cpu_limit);
 
         struct rlimit mem_limit;
-        rlim_t bytes_limit = (rlim_t)1024 * 1024 * 1024; // 1024 MB (1GB)
+        rlim_t bytes_limit = (rlim_t)1024 * 1024 * 1024;
         mem_limit.rlim_cur = bytes_limit;
         mem_limit.rlim_max = bytes_limit;
         setrlimit(RLIMIT_AS, &mem_limit);
 
         int logFd = open(logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (logFd >= 0) {
-            // 同时重定向 stdout 和 stderr，彻底防止警告日志混入判题机的 JSON 流！
             dup2(logFd, STDOUT_FILENO);
             dup2(logFd, STDERR_FILENO);
             close(logFd);
+        } else {
+            // 兜底：如果日志文件打开失败，重定向到 /dev/null，决不污染判题机的 stdout JSON 流！
+            int devNull = open("/dev/null", O_WRONLY);
+            if (devNull >= 0) {
+                dup2(devNull, STDOUT_FILENO);
+                dup2(devNull, STDERR_FILENO);
+                close(devNull);
+            }
         }
 
         char* args[] = {
@@ -55,14 +62,13 @@ bool Compiler::compileCpp(const std::string& srcPath, const std::string& execPat
         int elapsedMs = 0;
         bool isTimeout = false;
 
-        // 父进程防编译卡死循环
         while (true) {
             pid_t res = waitpid(pid, &status, WNOHANG);
             if (res == pid) break;
             if (res == 0) {
                 usleep(20000); // 20ms
                 elapsedMs += 20;
-                if (elapsedMs >= 15000) { // 15秒超时
+                if (elapsedMs >= 15000) { // 15s 超时
                     kill(-pid, SIGKILL);
                     waitpid(pid, &status, 0);
                     isTimeout = true;
@@ -74,21 +80,35 @@ bool Compiler::compileCpp(const std::string& srcPath, const std::string& execPat
         }
 
         if (isTimeout) {
-            errorMsg = "Compilation Timed Out (Exceeded 15 seconds)";
+            errorMsg = "Compilation Timed Out (Exceeded 15 seconds limit)";
             unlink(logPath.c_str());
             return false;
         }
 
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-            unlink(logPath.c_str()); // 编译成功删除日志
-            return true;
-        } else {
-            std::ifstream logFile(logPath);
-            std::stringstream ss;
-            ss << logFile.rdbuf();
-            errorMsg = ss.str();
+        if (WIFEXITED(status)) {
+            if (WEXITSTATUS(status) == 0) {
+                unlink(logPath.c_str()); // 编译成功删除日志
+                return true;
+            } else {
+                std::ifstream logFile(logPath);
+                std::stringstream ss;
+                ss << logFile.rdbuf();
+                errorMsg = ss.str();
+                if (errorMsg.empty()) {
+                    errorMsg = "Compilation failed with exit code " + std::to_string(WEXITSTATUS(status));
+                }
+                unlink(logPath.c_str());
+                return false;
+            }
+        } else if (WIFSIGNALED(status)) {
+            // 捕获编译进程被信号杀死的详细原因
+            errorMsg = "Compiler terminated by signal " + std::to_string(WTERMSIG(status));
             unlink(logPath.c_str());
             return false;
         }
+
+        errorMsg = "Unknown compilation error";
+        unlink(logPath.c_str());
+        return false;
     }
 }
