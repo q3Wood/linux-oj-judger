@@ -28,7 +28,6 @@ std::string statusToString(Status status) {
     }
 }
 
-// 完善的 JSON 字符串转义（彻底转义 ASCII 0x00 - 0x1F 控制字符）
 std::string escapeJson(const std::string& input) {
     std::ostringstream ss;
     for (unsigned char c : input) {
@@ -63,22 +62,18 @@ void outputJson(Status status, int timeMs, int memoryKb, const std::string& erro
               << std::endl;
 }
 
-// 自然数逻辑比较：确保 "2.in" 排在 "10.in" 前面
-// 智能自然数排序：防止 "12" 和 "12b" 解析成相同数字导致排序不稳定
 bool naturalSortCompare(const std::string& a, const std::string& b) {
     try {
         size_t idxA = 0, idxB = 0;
         int numA = std::stoi(a, &idxA);
         int numB = std::stoi(b, &idxB);
 
-        // 如果数字前缀不相等，直接按数字大小排
         if (numA != numB) {
             return numA < numB;
         }
-        // 如果数字前缀相同（例如 "12" 和 "12b"），则退回字符串字典序全量比对
         return a < b;
     } catch (...) {
-        return a < b; // 解析非纯数字时，退回标准字符串比对
+        return a < b;
     }
 }
 
@@ -88,7 +83,7 @@ int main(int argc, char* argv[]) {
     std::string srcPath = "../test_cases/1/solution.cpp";
     int timeLimitMs = 1000;          
     int memoryLimitKb = 128 * 1024;   
-    int maxOutputSizeKb = 20 * 1024; // 默认 20MB
+    int maxOutputSizeKb = 20 * 1024;
 
     int opt;
     while ((opt = getopt(argc, argv, "p:i:s:t:m:o:")) != -1) {
@@ -108,13 +103,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // 关键修正：对数值型参数进行下限有效性校验！
+    if (timeLimitMs <= 0 || memoryLimitKb <= 0 || maxOutputSizeKb <= 0) {
+        outputJson(Status::SYSTEM_ERROR, 0, 0, "Numeric parameters (time, memory, output size) must be positive (> 0)", 0, 0);
+        return 0;
+    }
+
     std::string testCasesDir = "../test_cases/" + problemId;
-    // 关键修正 1：按 submissionId 创建独立的 workspace 隔离子目录，杜绝并发覆盖！
     std::string workspaceDir = "../workspace/" + submissionId;
     std::string execPath = workspaceDir + "/solution";
     std::string errorMsg;
 
-    // 关键修正 2：带 try-catch 保护的目录创建与扫描
     try {
         fs::create_directories(workspaceDir);
     } catch (const std::exception& e) {
@@ -138,7 +137,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // 2. 收集 .in 文件并执行自然数排序
+    // 2. 收集并排序用例
     std::vector<std::string> inFiles;
     try {
         for (const auto& entry : fs::directory_iterator(testCasesDir)) {
@@ -181,7 +180,6 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // 关键修正 3：防止 SIGXFSZ 被用户捕获后绕过，比对前显式校验文件体积
         try {
             uintmax_t outSize = fs::file_size(userOutPath);
             if (outSize > (uintmax_t)maxOutputSizeKb * 1024) {
@@ -193,7 +191,6 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // 比对结果
         if (!Comparer::compare(userOutPath, stdOutPath)) {
             outputJson(Status::WRONG_ANSWER, runResult.time_cost_ms, runResult.memory_cost_kb, "Output mismatch on " + baseName + ".in", i, totalCount);
             return 0;
@@ -203,7 +200,6 @@ int main(int argc, char* argv[]) {
         maxMemoryCost = std::max(maxMemoryCost, runResult.memory_cost_kb);
     }
 
-    // 全部通过
     outputJson(Status::ACCEPTED, maxTimeCost, maxMemoryCost, "", totalCount, totalCount);
 
     return 0;
